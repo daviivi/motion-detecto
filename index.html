@@ -1,0 +1,1032 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0, minimum-scale=1.0, viewport-fit=cover">
+  <title>Motion Detector - Detecção de Movimento</title>
+  
+  <!-- iOS Safari specific -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Motion Detector">
+  <meta name="apple-touch-fullscreen" content="yes">
+  
+  <!-- Android Chrome specific -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#1e3a8a">
+  <meta name="msapplication-navbutton-color" content="#1e3a8a">
+  
+  <!-- Prevent zoom on input focus (iOS) -->
+  <meta name="format-detection" content="telephone=no">
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.2/p5.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <script>
+    // Global variables
+    let capture;
+    let video;
+    let previousFrame;
+    let motionThreshold = 25;
+    let currentSource = 'webcam';
+    let isVideoPlaying = false;
+    let uploadedVideo = null;
+    let canvasWidth = 640;
+    let canvasHeight = 480;
+    let isAppStarted = false;
+
+    // Start the application - GLOBAL FUNCTION
+    window.startApp = function() {
+      const welcomeScreen = document.getElementById('welcomeScreen');
+      welcomeScreen.classList.add('hidden');
+      isAppStarted = true;
+      
+      setTimeout(() => {
+        welcomeScreen.style.display = 'none';
+        initializeApp();
+      }, 500);
+    };
+
+    window.switchSource = function(source) {
+      currentSource = source;
+      
+      // Update tab buttons
+      document.querySelectorAll('.tab-button').forEach(tab => {
+        tab.classList.remove('active');
+      });
+      document.getElementById(`${source}-tab`).classList.add('active');
+      
+      // Show/hide upload section
+      const uploadSection = document.getElementById('video-upload-section');
+      const videoControls = document.getElementById('video-controls');
+      
+      if (source === 'video') {
+        uploadSection.style.display = 'block';
+        videoControls.style.display = 'none';
+        updateStatus('Faça upload de um vídeo para começar', 'loading');
+        
+        // Stop webcam if running
+        if (capture) {
+          capture.remove();
+          capture = null;
+        }
+        
+        // Reset video state
+        if (uploadedVideo) {
+          uploadedVideo.remove();
+          uploadedVideo = null;
+        }
+        isVideoPlaying = false;
+        previousFrame = null;
+      } else {
+        uploadSection.style.display = 'none';
+        videoControls.style.display = 'none';
+        
+        // Stop uploaded video if playing
+        if (uploadedVideo) {
+          uploadedVideo.remove();
+          uploadedVideo = null;
+        }
+        isVideoPlaying = false;
+        previousFrame = null;
+        
+        initializeWebcam();
+      }
+      
+      // Clear error messages
+      clearErrorMessage();
+    };
+
+    window.handleVideoUpload = function(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      
+      if (!file.type.startsWith('video/')) {
+        showErrorMessage('Por favor, selecione um arquivo de vídeo válido (MP4, MOV, AVI, etc.)');
+        return;
+      }
+      
+      updateStatus('Carregando vídeo...', 'loading');
+      clearErrorMessage();
+      
+      // Stop webcam if running
+      if (capture) {
+        capture.remove();
+        capture = null;
+      }
+      
+      // Remove previous video if exists
+      if (uploadedVideo) {
+        uploadedVideo.remove();
+        uploadedVideo = null;
+      }
+      
+      isVideoPlaying = false;
+      previousFrame = null;
+      
+      try {
+        const videoURL = URL.createObjectURL(file);
+        console.log('Creating video element with URL:', videoURL);
+        
+        uploadedVideo = createVideo(videoURL);
+        uploadedVideo.size(canvasWidth, canvasHeight);
+        uploadedVideo.hide();
+        
+        // Set up video event listeners
+        uploadedVideo.elt.addEventListener('loadedmetadata', () => {
+          console.log('Video metadata loaded:', {
+            duration: uploadedVideo.elt.duration,
+            width: uploadedVideo.elt.videoWidth,
+            height: uploadedVideo.elt.videoHeight
+          });
+        });
+        
+        uploadedVideo.elt.addEventListener('loadeddata', () => {
+          console.log('Video data loaded successfully');
+          updateStatus('Vídeo carregado - Pressione Play para iniciar', 'ready');
+          document.getElementById('video-controls').style.display = 'flex';
+          updatePlayPauseButton();
+        });
+        
+        uploadedVideo.elt.addEventListener('canplay', () => {
+          console.log('Video can start playing');
+        });
+        
+        uploadedVideo.elt.addEventListener('play', () => {
+          console.log('Video started playing');
+          isVideoPlaying = true;
+          updatePlayPauseButton();
+          updateStatus('Reproduzindo vídeo - Detectando movimento...', 'ready');
+        });
+        
+        uploadedVideo.elt.addEventListener('pause', () => {
+          console.log('Video paused');
+          isVideoPlaying = false;
+          updatePlayPauseButton();
+          updateStatus('Vídeo pausado', 'ready');
+        });
+        
+        uploadedVideo.elt.addEventListener('ended', () => {
+          console.log('Video ended');
+          isVideoPlaying = false;
+          updatePlayPauseButton();
+          updateStatus('Vídeo finalizado', 'ready');
+        });
+        
+        uploadedVideo.elt.addEventListener('error', (e) => {
+          console.error('Video error:', e);
+          showErrorMessage('Erro ao carregar o vídeo. Verifique se o formato é suportado.');
+          updateStatus('Erro ao carregar vídeo', 'error');
+        });
+        
+      } catch (error) {
+        console.error('Video creation failed:', error);
+        showErrorMessage('Erro ao criar elemento de vídeo. Tente outro arquivo.');
+        updateStatus('Erro ao carregar vídeo', 'error');
+      }
+    };
+
+    window.togglePlayPause = function() {
+      if (!uploadedVideo || !uploadedVideo.elt) {
+        console.log('No video available');
+        return;
+      }
+      
+      try {
+        if (isVideoPlaying) {
+          uploadedVideo.pause();
+        } else {
+          uploadedVideo.play();
+        }
+      } catch (error) {
+        console.error('Error toggling play/pause:', error);
+        showErrorMessage('Erro ao controlar reprodução do vídeo');
+      }
+    };
+
+    window.restartVideo = function() {
+      if (!uploadedVideo || !uploadedVideo.elt) return;
+      
+      try {
+        uploadedVideo.time(0);
+        if (isVideoPlaying) {
+          uploadedVideo.play();
+        }
+        updateStatus('Vídeo reiniciado', 'ready');
+        previousFrame = null; // Reset motion detection
+      } catch (error) {
+        console.error('Error restarting video:', error);
+        showErrorMessage('Erro ao reiniciar vídeo');
+      }
+    };
+
+    // Internal functions
+    function initializeApp() {
+      updateStatus('Inicializando câmera...', 'loading');
+      
+      // Initialize with webcam by default
+      setTimeout(() => {
+        if (currentSource === 'webcam') {
+          initializeWebcam();
+        }
+      }, 1000);
+    }
+
+    function updateStatus(message, type = 'loading') {
+      const statusElement = document.getElementById('status');
+      if (!statusElement) return;
+      
+      // Update message with indicator
+      statusElement.innerHTML = `<span class="status-indicator status-${type}"></span>${message}`;
+    }
+
+    function initializeWebcam() {
+      updateStatus('🎥 Clique em "Permitir" quando o navegador solicitar acesso à câmera', 'loading');
+      
+      if (capture) {
+        capture.remove();
+      }
+      
+      try {
+        // Show helpful message before requesting camera
+        showCameraPermissionGuide();
+        
+        // Request camera access
+        capture = createCapture(VIDEO);
+        capture.size(canvasWidth, canvasHeight);
+        capture.hide(); // Hide the default video element
+        
+        // Wait a moment for camera to initialize
+        setTimeout(() => {
+          if (capture && capture.elt && capture.elt.videoWidth > 0) {
+            updateStatus('Câmera ativa - Detectando movimento...', 'ready');
+            clearErrorMessage();
+          } else {
+            updateStatus('Aguardando permissão da câmera...', 'loading');
+            showCameraHelp();
+          }
+        }, 3000);
+        
+        // Check again after more time
+        setTimeout(() => {
+          if (capture && capture.elt && capture.elt.videoWidth === 0) {
+            updateStatus('Câmera não autorizada', 'error');
+            showCameraHelp();
+          }
+        }, 8000);
+        
+      } catch (error) {
+        console.error('Camera access failed:', error);
+        updateStatus('Erro ao acessar a câmera', 'error');
+        showCameraHelp();
+      }
+    }
+
+    function showCameraPermissionGuide() {
+      const container = document.getElementById('error-container');
+      if (!container) return;
+      
+      container.innerHTML = `
+        <div style="background: rgba(0, 255, 0, 0.1); border: 2px solid rgba(0, 255, 0, 0.3); border-radius: 12px; padding: 20px; margin: 15px 0; color: white; text-align: center;">
+          <div style="font-size: 2rem; margin-bottom: 10px;">📹</div>
+          <h3 style="margin: 0 0 10px 0; color: #00ff00;">Acesso à Câmera Necessário</h3>
+          <p style="margin: 5px 0;">O navegador vai solicitar permissão para acessar sua câmera.</p>
+          <p style="margin: 5px 0; font-weight: bold;">👆 Clique em "Permitir" ou "Allow" quando aparecer a solicitação</p>
+        </div>
+      `;
+    }
+
+    function showCameraHelp() {
+      const container = document.getElementById('error-container');
+      if (!container) return;
+      
+      container.innerHTML = `
+        <div class="error-message">
+          <div style="font-size: 1.5rem; margin-bottom: 15px;">🚫 Câmera não acessível</div>
+          <div style="text-align: left; margin: 15px 0;">
+            <strong>Possíveis soluções:</strong><br>
+            📍 Verifique se você permitiu acesso à câmera<br>
+            🔄 Atualize a página e tente novamente<br>
+            🔒 Clique no ícone de câmera na barra de endereços<br>
+            📱 Em mobile, permita acesso nas configurações do navegador<br>
+            🎬 Ou use a opção "Upload Vídeo" para testar com arquivos
+          </div>
+          <button onclick="window.location.reload()" style="background: #00ff00; color: black; border: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; cursor: pointer; margin: 10px 5px;">
+            🔄 Tentar Novamente
+          </button>
+          <button onclick="window.switchSource('video')" style="background: #3b82f6; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-weight: bold; cursor: pointer; margin: 10px 5px;">
+            🎬 Usar Upload de Vídeo
+          </button>
+        </div>
+      `;
+    }
+
+    function updatePlayPauseButton() {
+      const btn = document.getElementById('play-pause-btn');
+      if (btn) {
+        btn.innerHTML = isVideoPlaying ? '⏸️ Pause' : '▶️ Play';
+      }
+    }
+
+    function showErrorMessage(message) {
+      const container = document.getElementById('error-container');
+      if (container) {
+        container.innerHTML = `<div class="error-message">${message}</div>`;
+      }
+      console.error('Error:', message);
+    }
+
+    function clearErrorMessage() {
+      const container = document.getElementById('error-container');
+      if (container) {
+        container.innerHTML = '';
+      }
+    }
+
+    // Drag and drop functionality
+    function setupDragAndDrop() {
+      const uploadArea = document.getElementById('upload-area');
+      
+      if (uploadArea) {
+        uploadArea.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          uploadArea.classList.add('dragover');
+        });
+        
+        uploadArea.addEventListener('dragleave', (e) => {
+          e.preventDefault();
+          uploadArea.classList.remove('dragover');
+        });
+        
+        uploadArea.addEventListener('drop', (e) => {
+          e.preventDefault();
+          uploadArea.classList.remove('dragover');
+          
+          const files = e.dataTransfer.files;
+          if (files.length > 0) {
+            const file = files[0];
+            if (file.type.startsWith('video/')) {
+              const fileInput = document.getElementById('file-input');
+              if (fileInput) {
+                fileInput.files = files;
+                window.handleVideoUpload({ target: { files: files } });
+              }
+            } else {
+              showErrorMessage('Por favor, selecione um arquivo de vídeo válido.');
+            }
+          }
+        });
+        
+        // Click to upload
+        uploadArea.addEventListener('click', () => {
+          const fileInput = document.getElementById('file-input');
+          if (fileInput) {
+            fileInput.click();
+          }
+        });
+      }
+    }
+
+    // Initialize when page loads
+    window.addEventListener('load', function() {
+      console.log('Page loaded, setting up drag and drop');
+      setupDragAndDrop();
+    });
+
+    // p5.js functions
+    function setup() {
+      console.log('p5.js setup started');
+      
+      // Create canvas and attach to container
+      let canvas = createCanvas(canvasWidth, canvasHeight);
+      canvas.parent('canvas-container');
+      
+      // Adjust canvas size for mobile
+      if (windowWidth < 768) {
+        const aspectRatio = canvasHeight / canvasWidth;
+        canvasWidth = Math.min(windowWidth - 40, 640);
+        canvasHeight = canvasWidth * aspectRatio;
+        resizeCanvas(canvasWidth, canvasHeight);
+      }
+      
+      pixelDensity(1); // Optimize for performance
+      
+      if (!isAppStarted) {
+        // Don't start yet, wait for welcome screen
+        background(0);
+        fill(255);
+        textAlign(CENTER, CENTER);
+        textSize(20);
+        text('Aguardando inicialização...', width/2, height/2);
+      }
+    }
+
+    function draw() {
+      if (!isAppStarted) {
+        background(0);
+        fill(255);
+        textAlign(CENTER, CENTER);
+        textSize(16);
+        text('Pressione "Começar" para inicializar', width/2, height/2);
+        return;
+      }
+      
+      background(0);
+      
+      let currentFrame;
+      
+      // Get current frame based on source
+      if (currentSource === 'webcam' && capture && capture.elt && capture.elt.videoWidth > 0) {
+        currentFrame = capture;
+      } else if (currentSource === 'video' && uploadedVideo && uploadedVideo.elt && uploadedVideo.elt.videoWidth > 0) {
+        currentFrame = uploadedVideo;
+      }
+      
+      if (!currentFrame) {
+        fill(255);
+        textAlign(CENTER, CENTER);
+        textSize(16);
+        if (currentSource === 'video') {
+          text('Faça upload de um vídeo para começar', width/2, height/2);
+        } else {
+          text('Aguardando câmera...', width/2, height/2);
+        }
+        return;
+      }
+      
+      // Display current frame
+      image(currentFrame, 0, 0, width, height);
+      
+      // Motion detection (only if video is playing or webcam is active)
+      if (currentSource === 'webcam' || (currentSource === 'video' && isVideoPlaying)) {
+        if (previousFrame && frameCount % 3 === 0) { // Check every 3 frames for performance
+          detectMotion(currentFrame);
+        }
+        
+        // Store current frame for next comparison (every few frames)
+        if (frameCount % 3 === 0) {
+          previousFrame = currentFrame.get();
+        }
+      }
+    }
+
+    function detectMotion(currentFrame) {
+      if (!currentFrame || !previousFrame) return;
+      
+      currentFrame.loadPixels();
+      previousFrame.loadPixels();
+      
+      let motionCount = 0;
+      let totalPixels = 0;
+      let step = 8; // Check every 8th pixel for better performance
+      
+      for (let x = 0; x < currentFrame.width; x += step) {
+        for (let y = 0; y < currentFrame.height; y += step) {
+          let loc = (x + y * currentFrame.width) * 4;
+          
+          if (loc >= 0 && loc < currentFrame.pixels.length - 3) {
+            let r1 = currentFrame.pixels[loc];
+            let g1 = currentFrame.pixels[loc + 1];
+            let b1 = currentFrame.pixels[loc + 2];
+            
+            let r2 = previousFrame.pixels[loc];
+            let g2 = previousFrame.pixels[loc + 1];
+            let b2 = previousFrame.pixels[loc + 2];
+            
+            let diff = dist(r1, g1, b1, r2, g2, b2);
+            
+            if (diff > motionThreshold) {
+              motionCount++;
+              
+              // Draw motion indicator
+              let canvasX = map(x, 0, currentFrame.width, 0, width);
+              let canvasY = map(y, 0, currentFrame.height, 0, height);
+              
+              fill(255, 0, 0, 150);
+              noStroke();
+              ellipse(canvasX, canvasY, step);
+            }
+            
+            totalPixels++;
+          }
+        }
+      }
+      
+      // Calculate motion percentage
+      let motionPercentage = totalPixels > 0 ? (motionCount / totalPixels) * 100 : 0;
+      
+      // Display motion info
+      fill(0, 0, 0, 150);
+      noStroke();
+      rect(5, 5, 250, 60);
+      
+      fill(255, 255, 0);
+      textAlign(LEFT, TOP);
+      textSize(14);
+      text(`Movimento: ${motionPercentage.toFixed(1)}%`, 10, 15);
+      
+      // Motion threshold indicator
+      fill(motionPercentage > 3 ? color(255, 0, 0) : color(0, 255, 0));
+      text(motionPercentage > 3 ? 'MOVIMENTO DETECTADO!' : 'Sem movimento significativo', 10, 35);
+    }
+
+    function windowResized() {
+      if (windowWidth < 768) {
+        const aspectRatio = canvasHeight / canvasWidth;
+        canvasWidth = Math.min(windowWidth - 40, 640);
+        canvasHeight = canvasWidth * aspectRatio;
+        resizeCanvas(canvasWidth, canvasHeight);
+      }
+    }
+  </script>
+  
+  <style>
+    /* Universal reset and mobile-first approach */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+    
+    html {
+      scroll-behavior: smooth;
+      -webkit-text-size-adjust: 100%;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      height: 100%;
+      width: 100%;
+    }
+    
+    body {
+      background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 40%, #60a5fa 70%, #93c5fd 100%);
+      min-height: 100vh;
+      min-height: -webkit-fill-available;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, Roboto, Oxygen, Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif;
+      margin: 0;
+      padding: env(safe-area-inset-top, 10px) env(safe-area-inset-right, 10px) env(safe-area-inset-bottom, 10px) env(safe-area-inset-left, 10px);
+      overflow-x: hidden;
+      user-select: none;
+      position: relative;
+      width: 100%;
+      background-attachment: fixed;
+    }
+    
+    .main-container {
+      width: 100%;
+      max-width: 900px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+      flex: 1;
+    }
+    
+    h1 {
+      color: white;
+      font-size: 2.5rem;
+      font-weight: 900;
+      text-align: center;
+      margin-bottom: 1rem;
+      text-shadow: 2px 2px 10px rgba(0, 0, 0, 0.5);
+    }
+    
+    p {
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 1.1rem;
+      text-align: center;
+      margin-bottom: 1.5rem;
+      text-shadow: 1px 1px 5px rgba(0, 0, 0, 0.3);
+      line-height: 1.5;
+    }
+    
+    #status {
+      color: white;
+      font-size: 1rem;
+      font-weight: 600;
+      text-align: center;
+      margin-bottom: 1.5rem;
+      padding: 12px 20px;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 15px;
+      backdrop-filter: blur(15px);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 50px;
+      max-width: 100%;
+    }
+    
+    /* Canvas styling */
+    canvas {
+      border: 2px solid rgba(255, 255, 255, 0.8);
+      border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+      max-width: 100%;
+      height: auto;
+      display: block;
+      background: #000;
+      transform: translateZ(0);
+    }
+    
+    /* Status indicators */
+    .status-indicator {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      margin-right: 8px;
+      animation: pulse 2s infinite;
+      flex-shrink: 0;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.6; transform: scale(1.1); }
+    }
+    
+    .status-loading { 
+      background: linear-gradient(45deg, #ffd700, #ffed4e);
+      box-shadow: 0 0 8px rgba(255, 215, 0, 0.5);
+    }
+    .status-ready { 
+      background: linear-gradient(45deg, #00ff00, #32ff32);
+      box-shadow: 0 0 8px rgba(0, 255, 0, 0.5);
+    }
+    .status-error { 
+      background: linear-gradient(45deg, #ff0000, #ff3232);
+      box-shadow: 0 0 8px rgba(255, 0, 0, 0.5);
+    }
+    
+    /* Button styling */
+    .source-tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      justify-content: center;
+      width: 100%;
+    }
+    
+    .tab-button {
+      flex: 1;
+      min-width: 120px;
+      max-width: 200px;
+      padding: 16px 20px;
+      background: rgba(255, 255, 255, 0.15);
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-radius: 16px;
+      color: white;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      font-size: 16px;
+      font-weight: 700;
+      min-height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(12px);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    }
+    
+    .tab-button:hover {
+      background: rgba(255, 255, 255, 0.25);
+      transform: scale(0.98);
+      box-shadow: 0 4px 20px rgba(255, 255, 255, 0.2);
+    }
+    
+    .tab-button.active {
+      background: rgba(0, 255, 0, 0.2);
+      border-color: #00ff00;
+      box-shadow: 0 0 25px rgba(0, 255, 0, 0.4);
+      color: #ffffff;
+    }
+    
+    /* Upload area */
+    #video-upload-section {
+      display: none;
+      margin-bottom: 20px;
+      width: 100%;
+      animation: fadeIn 0.5s ease-out;
+    }
+    
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    
+    .upload-area {
+      border: 3px dashed rgba(255, 255, 255, 0.6);
+      border-radius: 20px;
+      padding: 40px 20px;
+      text-align: center;
+      background: rgba(255, 255, 255, 0.1);
+      cursor: pointer;
+      transition: all 0.3s ease;
+      width: 100%;
+      min-height: 150px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(10px);
+    }
+    
+    .upload-area:hover {
+      border-color: rgba(255, 255, 255, 0.8);
+      background: rgba(255, 255, 255, 0.15);
+      transform: scale(1.02);
+    }
+    
+    .upload-area.dragover {
+      border-color: #00ff00;
+      background: rgba(0, 255, 0, 0.1);
+      transform: scale(1.02);
+    }
+    
+    .upload-icon {
+      font-size: 3rem;
+      margin-bottom: 15px;
+      color: rgba(255, 255, 255, 0.8);
+    }
+    
+    .upload-text {
+      color: white;
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+    
+    .upload-hint {
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 0.9rem;
+    }
+    
+    #file-input {
+      display: none;
+    }
+    
+    /* Video controls */
+    #video-controls {
+      display: none;
+      gap: 10px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      justify-content: center;
+      width: 100%;
+    }
+    
+    .control-button {
+      padding: 12px 24px;
+      background: rgba(255, 255, 255, 0.2);
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-radius: 12px;
+      color: white;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      font-size: 14px;
+      font-weight: 600;
+      backdrop-filter: blur(10px);
+      min-width: 100px;
+    }
+    
+    .control-button:hover {
+      background: rgba(255, 255, 255, 0.3);
+      transform: scale(0.95);
+    }
+    
+    .control-button:active {
+      transform: scale(0.90);
+    }
+    
+    /* Error messages */
+    .error-message {
+      background: rgba(255, 0, 0, 0.1);
+      border: 2px solid rgba(255, 0, 0, 0.3);
+      border-radius: 12px;
+      padding: 20px;
+      color: white;
+      text-align: center;
+      margin: 10px 0;
+    }
+    
+    /* Welcome screen */
+    #welcomeScreen {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 40%, #60a5fa 70%, #93c5fd 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      transition: opacity 0.5s ease-out;
+    }
+    
+    #welcomeScreen.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    
+    .welcome-content {
+      text-align: center;
+      max-width: 500px;
+      padding: 40px 20px;
+    }
+    
+    .welcome-title {
+      font-size: 3rem;
+      font-weight: 900;
+      color: white;
+      margin-bottom: 1rem;
+      text-shadow: 2px 2px 10px rgba(0, 0, 0, 0.5);
+    }
+    
+    .welcome-subtitle {
+      font-size: 1.2rem;
+      color: rgba(255, 255, 255, 0.9);
+      margin-bottom: 2rem;
+      line-height: 1.6;
+    }
+    
+    .start-button {
+      padding: 16px 32px;
+      background: linear-gradient(45deg, #00ff00, #32ff32);
+      border: none;
+      border-radius: 16px;
+      color: black;
+      font-size: 1.2rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      box-shadow: 0 4px 20px rgba(0, 255, 0, 0.3);
+    }
+    
+    .start-button:hover {
+      transform: scale(1.05);
+      box-shadow: 0 6px 25px rgba(0, 255, 0, 0.4);
+    }
+    
+    .start-button:active {
+      transform: scale(0.95);
+    }
+    
+    /* Mobile responsive */
+    @media (max-width: 768px) {
+      h1 {
+        font-size: 2rem;
+      }
+      
+      .welcome-title {
+        font-size: 2.5rem;
+      }
+      
+      .tab-button {
+        min-width: 100px;
+        padding: 12px 16px;
+        font-size: 14px;
+      }
+      
+      .upload-area {
+        padding: 30px 15px;
+        min-height: 120px;
+      }
+      
+      .upload-icon {
+        font-size: 2.5rem;
+      }
+      
+      .upload-text {
+        font-size: 1rem;
+      }
+      
+      canvas {
+        max-width: calc(100vw - 40px);
+      }
+    }
+    
+    @media (max-width: 480px) {
+      .main-container {
+        padding: 15px;
+      }
+      
+      h1 {
+        font-size: 1.8rem;
+      }
+      
+      .welcome-title {
+        font-size: 2rem;
+      }
+      
+      .source-tabs {
+        flex-direction: column;
+        gap: 8px;
+      }
+      
+      .tab-button {
+        min-width: auto;
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Welcome Screen -->
+  <div id="welcomeScreen">
+    <div class="welcome-content">
+      <div class="welcome-title">🎯 Motion Detector</div>
+      <div class="welcome-subtitle">
+        Detecte movimento em tempo real usando sua câmera ou faça upload de vídeos para análise.
+        <br><br>
+        ✨ Tecnologia de detecção avançada<br>
+        📱 Funciona em mobile e desktop<br>
+        🎬 Suporte para múltiplos formatos
+      </div>
+      <button class="start-button" onclick="startApp()">
+        🚀 Começar Detecção
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Application -->
+  <div class="main-container">
+    <h1>🎯 Motion Detector</h1>
+    <p>Detecção de movimento em tempo real com análise visual avançada</p>
+    
+    <!-- Status Display -->
+    <div id="status">
+      <span class="status-indicator status-loading"></span>
+      Inicializando sistema...
+    </div>
+    
+    <!-- Source Selection -->
+    <div class="source-tabs">
+      <button id="webcam-tab" class="tab-button active" onclick="switchSource('webcam')">
+        📹 Câmera Ao Vivo
+      </button>
+      <button id="video-tab" class="tab-button" onclick="switchSource('video')">
+        🎬 Upload Vídeo
+      </button>
+    </div>
+    
+    <!-- Video Upload Section -->
+    <div id="video-upload-section">
+      <div class="upload-area" id="upload-area">
+        <div class="upload-icon">📁</div>
+        <div class="upload-text">Clique ou arraste um vídeo aqui</div>
+        <div class="upload-hint">Suporta MP4, MOV, AVI, WebM e outros formatos</div>
+      </div>
+      <input type="file" id="file-input" accept="video/*" onchange="handleVideoUpload(event)">
+    </div>
+    
+    <!-- Video Controls -->
+    <div id="video-controls">
+      <button id="play-pause-btn" class="control-button" onclick="togglePlayPause()">
+        ▶️ Play
+      </button>
+      <button class="control-button" onclick="restartVideo()">
+        🔄 Reiniciar
+      </button>
+    </div>
+    
+    <!-- Error Container -->
+    <div id="error-container"></div>
+    
+    <!-- Canvas Container -->
+    <div id="canvas-container"></div>
+    
+    <!-- Instructions -->
+    <div style="background: rgba(255, 255, 255, 0.1); border-radius: 15px; padding: 20px; margin-top: 20px; max-width: 600px;">
+      <h3 style="color: white; margin-top: 0; text-align: center;">📋 Como usar:</h3>
+      <div style="color: rgba(255, 255, 255, 0.9); text-align: left;">
+        <p><strong>🎥 Câmera Ao Vivo:</strong><br>
+        • Permita acesso à câmera quando solicitado<br>
+        • Movimento será detectado automaticamente<br>
+        • Pontos vermelhos indicam áreas de movimento</p>
+        
+        <p><strong>📁 Upload de Vídeo:</strong><br>
+        • Arraste e solte ou clique para selecionar<br>
+        • Use os controles para reproduzir/pausar<br>
+        • Detecção funciona durante a reprodução</p>
+        
+        <p><strong>🎯 Detecção:</strong><br>
+        • Verde: Sem movimento significativo<br>
+        • Vermelho: Movimento detectado!<br>
+        • Pontos vermelhos mostram áreas ativas</p>
+      </div>
+    </div>
+    
+    <!-- Footer -->
+    <div style="margin-top: 30px; text-align: center; color: rgba(255, 255, 255, 0.7); font-size: 0.9rem;">
+      Powered by p5.js • Funciona melhor no Chrome/Firefox
+    </div>
+  </div>
+</body>
+</html>
